@@ -8,6 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import {
+  BinaryDownloadError,
   CanaryExecutionFailedError,
   CanaryNotFoundError,
   InstallationFailedError,
@@ -52,9 +53,10 @@ interface ReleaseAsset {
   readonly browser_download_url?: unknown;
 }
 
-/** GETs a URL as text, authenticating when a token is available. Rejects on
- * any non-200 response, timeout, or transport error. */
-function httpsGetText(url: string, token: string | undefined): Promise<string> {
+/** GETs a URL as text, authenticating when a token is available. Rejects with
+ * {@link BinaryDownloadError} on any non-200 response, timeout, or transport
+ * error so callers can distinguish network failures from other problems. */
+export function httpsGetText(url: string, token: string | undefined): Promise<string> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = {
       "User-Agent": "ProtocolCanary-Action",
@@ -67,7 +69,12 @@ function httpsGetText(url: string, token: string | undefined): Promise<string> {
     const request = https.get(url, { headers, timeout: CHECKSUM_REQUEST_TIMEOUT_MS }, (response) => {
       if (response.statusCode !== 200) {
         response.resume();
-        reject(new Error(`GitHub returned status ${String(response.statusCode)} for ${url}`));
+        reject(
+          new BinaryDownloadError(
+            `Failed to download ${url}: received HTTP ${String(response.statusCode)}.`,
+            new Error(`GitHub returned status ${String(response.statusCode)} for ${url}`),
+          ),
+        );
         return;
       }
       let body = "";
@@ -80,9 +87,21 @@ function httpsGetText(url: string, token: string | undefined): Promise<string> {
       });
     });
     request.on("timeout", () => {
-      request.destroy(new Error(`timed out fetching ${url}`));
+      request.destroy(
+        new BinaryDownloadError(
+          `Failed to download ${url}: the request timed out after ${String(CHECKSUM_REQUEST_TIMEOUT_MS)}ms.`,
+          new Error(`timed out fetching ${url}`),
+        ),
+      );
     });
-    request.on("error", reject);
+    request.on("error", (error) => {
+      reject(
+        new BinaryDownloadError(
+          `Failed to download ${url}: ${error instanceof Error ? error.message : String(error)}.`,
+          error instanceof Error ? error : undefined,
+        ),
+      );
+    });
   });
 }
 
@@ -336,7 +355,11 @@ async function saveToCache(resolved: ResolvedVersion, binaryPath: string): Promi
     await cache.saveCache([binaryPath], cacheKeyFor(resolved));
   } catch (error) {
     // Caching is a pure optimization; correctness never depends on it.
-    core.debug(`Cache save failed, ignoring: ${String(error)}`);
+    // Warn so the user knows caching failed but the install still succeeded.
+    core.warning(
+      `Cache save failed, continuing without caching: ${error instanceof Error ? error.message : String(error)}. ` +
+        "The install succeeded and this run will work correctly; only future runs may need to rebuild.",
+    );
   }
 }
 

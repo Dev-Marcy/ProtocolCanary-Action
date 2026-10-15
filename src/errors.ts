@@ -57,6 +57,18 @@ export class SummaryPublishFailedError extends CanaryActionError {
   readonly code = "SummaryPublishFailed";
 }
 
+/** Downloading a binary or checksum manifest from the network failed. */
+export class BinaryDownloadError extends CanaryActionError {
+  readonly code = "BinaryDownload";
+
+  constructor(
+    message: string,
+    readonly underlying?: unknown,
+  ) {
+    super(message);
+  }
+}
+
 /**
  * Narrows an unknown thrown value to a {@link CanaryActionError}. `main.ts`
  * uses this to distinguish an error this Action raised deliberately (which

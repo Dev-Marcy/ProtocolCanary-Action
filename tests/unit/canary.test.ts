@@ -71,7 +71,8 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: osMocks.homedirMock };
 });
 
-import { cargoInstallTimeoutMs, ensureCanaryInstalled, lookupPublishedChecksums, parseChecksumManifest } from "../../src/canary";
+import { cargoInstallTimeoutMs, ensureCanaryInstalled, httpsGetText, lookupPublishedChecksums, parseChecksumManifest } from "../../src/canary";
+import { BinaryDownloadError } from "../../src/errors";
 import { CARGO_INSTALL_TIMEOUT_FLOOR_MS } from "../../src/runner";
 import { CanaryNotFoundError, InstallationFailedError } from "../../src/errors";
 import type { ResolvedVersion } from "../../src/version";
@@ -810,8 +811,166 @@ describe("ensureCanaryInstalled", () => {
   });
 });
 
-// #355: Test checksum HTTP handling (200, 404, redirects, timeouts), manifest parsing, malformed input, safe errors
-describe("lookupPublishedChecksums HTTP handling (#355)", () => {
+// #356: Test BinaryDownloadError for download failures, actionable timeout errors, and nonfatal cache-save failures with warnings
+describe("BinaryDownloadError handling (#356)", () => {
+  beforeEach(() => {
+    httpsGetMock.mockReset();
+    coreMocks.warningMock.mockReset();
+    coreMocks.debugMock.mockReset();
+  });
+
+  describe("httpsGetText", () => {
+    it("throws BinaryDownloadError on HTTP 404", async () => {
+      httpsGetMock.mockImplementationOnce(respond(404, "not found"));
+
+      const error = await httpsGetText("https://example.test/checksums", undefined).then(
+        () => {
+          throw new Error("expected rejection");
+        },
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(BinaryDownloadError);
+      expect((error as BinaryDownloadError).code).toBe("BinaryDownload");
+      expect((error as BinaryDownloadError).message).toContain("HTTP 404");
+      expect((error as BinaryDownloadError).message).toContain("https://example.test/checksums");
+    });
+
+    it("throws BinaryDownloadError on HTTP 500", async () => {
+      httpsGetMock.mockImplementationOnce(respond(500, "server error"));
+
+      const error = await httpsGetText("https://example.test/checksums", undefined).then(
+        () => {
+          throw new Error("expected rejection");
+        },
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(BinaryDownloadError);
+      expect((error as BinaryDownloadError).code).toBe("BinaryDownload");
+      expect((error as BinaryDownloadError).message).toContain("HTTP 500");
+    });
+
+    it("throws BinaryDownloadError with actionable timeout message", async () => {
+      // Simulate the timeout handler being called by emitting on the request
+      httpsGetMock.mockImplementationOnce((url, _options, callback) => {
+        const request = new FakeRequest();
+        const response = new FakeResponse(200);
+        callback(response);
+        // Simulate the timeout event that Node.js would emit
+        setTimeout(() => {
+          request.emit("timeout");
+        }, 0);
+        return request;
+      });
+
+      const error = await httpsGetText("https://example.test/checksums", undefined).then(
+        () => {
+          throw new Error("expected rejection");
+        },
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(BinaryDownloadError);
+      expect((error as BinaryDownloadError).code).toBe("BinaryDownload");
+      expect((error as BinaryDownloadError).message).toContain("timed out after 10000ms");
+      expect((error as BinaryDownloadError).message).toContain("https://example.test/checksums");
+    });
+
+    it("throws BinaryDownloadError on network errors", async () => {
+      httpsGetMock.mockImplementationOnce((_url, _options, callback) => {
+        const request = new FakeRequest();
+        callback(new FakeResponse(200));
+        setTimeout(() => {
+          request.destroy(new Error("ECONNREFUSED: Connection refused"));
+        }, 0);
+        return request;
+      });
+
+      const error = await httpsGetText("https://example.test/checksums", undefined).then(
+        () => {
+          throw new Error("expected rejection");
+        },
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(BinaryDownloadError);
+      expect((error as BinaryDownloadError).code).toBe("BinaryDownload");
+      expect((error as BinaryDownloadError).message).toContain("ECONNREFUSED");
+    });
+
+    it("preserves the underlying error for diagnostics", async () => {
+      const underlyingError = new Error("SELF_SIGNED_CERT_IN_CHAIN");
+      httpsGetMock.mockImplementationOnce((_url, _options, callback) => {
+        const request = new FakeRequest();
+        callback(new FakeResponse(200));
+        setTimeout(() => {
+          request.destroy(underlyingError);
+        }, 0);
+        return request;
+      });
+
+      const error = await httpsGetText("https://example.test/checksums", undefined).then(
+        () => {
+          throw new Error("expected rejection");
+        },
+        (e: unknown) => e,
+      );
+
+      expect(error).toBeInstanceOf(BinaryDownloadError);
+      expect((error as BinaryDownloadError).underlying).toBe(underlyingError);
+    });
+
+    it("includes the URL in the error message for debugging", async () => {
+      httpsGetMock.mockImplementationOnce(respond(403, "forbidden"));
+
+      const error = await httpsGetText("https://example.test/protected", "token123").then(
+        () => {
+          throw new Error("expected rejection");
+        },
+        (e: unknown) => e,
+      );
+
+      expect((error as BinaryDownloadError).message).toContain("https://example.test/protected");
+    });
+  });
+
+  it("warns on cache save failure but does not throw", async () => {
+    cacheMocks.isFeatureAvailableMock.mockReturnValue(true);
+    cacheMocks.saveCacheMock.mockRejectedValue(new Error("cache service unavailable"));
+
+    // ensureCanaryInstalled should complete successfully even when cache save fails
+    await expect(ensureCanaryInstalled(RESOLVED)).resolves.toEqual(
+      expect.objectContaining({ version: "0.1.0" }),
+    );
+
+    // Should have warned about the cache failure
+    expect(coreMocks.warningMock).toHaveBeenCalledTimes(1);
+    expect(coreMocks.warningMock).toHaveBeenCalledWith(
+      expect.stringContaining("Cache save failed"),
+    );
+    expect(coreMocks.warningMock).toHaveBeenCalledWith(
+      expect.stringContaining("continuing without caching"),
+    );
+  });
+
+  it("warns with actionable message on cache save conflict", async () => {
+    cacheMocks.isFeatureAvailableMock.mockReturnValue(true);
+    cacheMocks.saveCacheMock.mockRejectedValue(
+      new Error("Cache entry with matching key already exists and cannot be overwritten"),
+    );
+
+    await expect(ensureCanaryInstalled(RESOLVED)).resolves.toEqual(
+      expect.objectContaining({ version: "0.1.0" }),
+    );
+
+    expect(coreMocks.warningMock).toHaveBeenCalledWith(
+      expect.stringContaining("future runs may need to rebuild"),
+    );
+  });
+});
+
+describe("ensureCanaryInstalled install timeout (issue #65)", () => {
   beforeEach(() => {
     httpsGetMock.mockReset();
   });
