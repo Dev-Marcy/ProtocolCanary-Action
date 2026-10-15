@@ -71,7 +71,7 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: osMocks.homedirMock };
 });
 
-import { cargoInstallTimeoutMs, ensureCanaryInstalled } from "../../src/canary";
+import { cargoInstallTimeoutMs, ensureCanaryInstalled, lookupPublishedChecksums, parseChecksumManifest } from "../../src/canary";
 import { CARGO_INSTALL_TIMEOUT_FLOOR_MS } from "../../src/runner";
 import { CanaryNotFoundError, InstallationFailedError } from "../../src/errors";
 import type { ResolvedVersion } from "../../src/version";
@@ -807,6 +807,227 @@ describe("ensureCanaryInstalled", () => {
 
       expect(savedPath).toBe(path.join(tempCargoHome, "bin", "stellar-canary"));
     }
+  });
+});
+
+// #355: Test checksum HTTP handling (200, 404, redirects, timeouts), manifest parsing, malformed input, safe errors
+describe("lookupPublishedChecksums HTTP handling (#355)", () => {
+  beforeEach(() => {
+    httpsGetMock.mockReset();
+  });
+
+  it("returns checksums when GitHub returns 200 with a valid manifest", async () => {
+    const manifest = `${"a".repeat(64)}  stellar-canary\n`;
+    httpsGetMock
+      .mockImplementationOnce(
+        respond(200, JSON.stringify({
+          assets: [{ name: "SHA256SUMS", browser_download_url: "https://example.test/SHA256SUMS" }],
+        })),
+      )
+      .mockImplementationOnce(respond(200, manifest));
+
+    const result = await lookupPublishedChecksums("0.1.0");
+
+    expect(result).toBeDefined();
+    expect(result?.get("stellar-canary")).toBe("a".repeat(64));
+  });
+
+  it("returns undefined when the release has no checksum asset (404 on release)", async () => {
+    httpsGetMock.mockImplementationOnce(respond(404, ""));
+
+    const result = await lookupPublishedChecksums("0.1.0");
+
+    expect(result).toBeUndefined();
+  });
+
+  it("returns undefined when the release body is not valid JSON", async () => {
+    httpsGetMock.mockImplementationOnce(respond(200, "not valid json"));
+
+    const result = await lookupPublishedChecksums("0.1.0");
+
+    expect(result).toBeUndefined();
+    expect(coreMocks.debugMock).toHaveBeenCalledWith(expect.stringContaining("Could not look up"));
+  });
+
+  it("returns undefined when the parsed JSON has no assets array", async () => {
+    httpsGetMock.mockImplementationOnce(respond(200, JSON.stringify({ not_assets: [] })));
+
+    const result = await lookupPublishedChecksums("0.1.0");
+
+    expect(result).toBeUndefined();
+  });
+
+  it("returns undefined when the release has no matching checksum asset", async () => {
+    httpsGetMock.mockImplementationOnce(
+      respond(200, JSON.stringify({
+        assets: [
+          { name: "binary.tar.gz", browser_download_url: "https://example.test/binary.tar.gz" },
+        ],
+      })),
+    );
+
+    const result = await lookupPublishedChecksums("0.1.0");
+
+    expect(result).toBeUndefined();
+  });
+
+  it("returns undefined when the checksum asset URL returns 404", async () => {
+    httpsGetMock
+      .mockImplementationOnce(
+        respond(200, JSON.stringify({
+          assets: [{ name: "SHA256SUMS", browser_download_url: "https://example.test/SHA256SUMS" }],
+        })),
+      )
+      .mockImplementationOnce(respond(404, "not found"));
+
+    const result = await lookupPublishedChecksums("0.1.0");
+
+    expect(result).toBeUndefined();
+    expect(coreMocks.debugMock).toHaveBeenCalledWith(expect.stringContaining("Could not look up"));
+  });
+
+  it("returns undefined when the checksum manifest is empty after parsing", async () => {
+    httpsGetMock
+      .mockImplementationOnce(
+        respond(200, JSON.stringify({
+          assets: [{ name: "SHA256SUMS", browser_download_url: "https://example.test/SHA256SUMS" }],
+        })),
+      )
+      .mockImplementationOnce(respond(200, ""));
+
+    const result = await lookupPublishedChecksums("0.1.0");
+
+    expect(result).toBeUndefined();
+  });
+
+  it("returns undefined when the checksum manifest has only comments", async () => {
+    httpsGetMock
+      .mockImplementationOnce(
+        respond(200, JSON.stringify({
+          assets: [{ name: "SHA256SUMS", browser_download_url: "https://example.test/SHA256SUMS" }],
+        })),
+      )
+      .mockImplementationOnce(respond(200, "# only a comment\n# and another\n"));
+
+    const result = await lookupPublishedChecksums("0.1.0");
+
+    expect(result).toBeUndefined();
+  });
+
+  // Test that HTTPS timeout is handled gracefully
+  it("returns undefined when the request times out", async () => {
+    httpsGetMock.mockImplementationOnce((_url, _options, callback) => {
+      const request = new FakeRequest();
+      callback(new FakeResponse(200));
+      // Simulate timeout
+      setTimeout(() => request.destroy(new Error("timed out fetching https://example.test")), 0);
+      return request;
+    });
+
+    const result = await lookupPublishedChecksums("0.1.0");
+
+    expect(result).toBeUndefined();
+    expect(coreMocks.debugMock).toHaveBeenCalledWith(expect.stringContaining("Could not look up"));
+  });
+
+  it("returns undefined on network errors", async () => {
+    httpsGetMock.mockImplementationOnce((_url, _options, callback) => {
+      const request = new FakeRequest();
+      callback(new FakeResponse(200));
+      setTimeout(() => request.destroy(new Error("ECONNREFUSED")), 0);
+      return request;
+    });
+
+    const result = await lookupPublishedChecksums("0.1.0");
+
+    expect(result).toBeUndefined();
+    expect(coreMocks.debugMock).toHaveBeenCalledWith(expect.stringContaining("Could not look up"));
+  });
+});
+
+describe("parseChecksumManifest (#355)", () => {
+  it("parses standard sha256sum format", () => {
+    const manifest = `${"a".repeat(64)}  stellar-canary\n${"b".repeat(64)}  other-binary\n`;
+    const result = parseChecksumManifest(manifest);
+
+    expect(result.get("stellar-canary")).toBe("a".repeat(64));
+    expect(result.get("other-binary")).toBe("b".repeat(64));
+  });
+
+  it("parses binary-mode entries with * prefix", () => {
+    const manifest = `${"a".repeat(64)} *stellar-canary\n`;
+    const result = parseChecksumManifest(manifest);
+
+    expect(result.get("stellar-canary")).toBe("a".repeat(64));
+  });
+
+  it("parses entries with platform-arch suffixes", () => {
+    const manifest = `${"a".repeat(64)}  stellar-canary-linux-x64\n${"b".repeat(64)}  stellar-canary-darwin-arm64\n`;
+    const result = parseChecksumManifest(manifest);
+
+    expect(result.get("stellar-canary-linux-x64")).toBe("a".repeat(64));
+    expect(result.get("stellar-canary-darwin-arm64")).toBe("b".repeat(64));
+  });
+
+  it("tolerates comment lines starting with #", () => {
+    const manifest = `# Header comment\n${"a".repeat(64)}  stellar-canary\n# Another comment\n`;
+    const result = parseChecksumManifest(manifest);
+
+    expect(result.get("stellar-canary")).toBe("a".repeat(64));
+    expect(result.size).toBe(1);
+  });
+
+  it("tolerates Windows-style line endings (CRLF)", () => {
+    const manifest = `${"a".repeat(64)}  stellar-canary\r\n`;
+    const result = parseChecksumManifest(manifest);
+
+    expect(result.get("stellar-canary")).toBe("a".repeat(64));
+  });
+
+  it("tolerates trailing whitespace", () => {
+    const manifest = `${"a".repeat(64)}  stellar-canary   \n`;
+    const result = parseChecksumManifest(manifest);
+
+    expect(result.get("stellar-canary")).toBe("a".repeat(64));
+  });
+
+  it("normalizes digests to lowercase", () => {
+    const manifest = `${"A".repeat(64)}  stellar-canary\n`;
+    const result = parseChecksumManifest(manifest);
+
+    expect(result.get("stellar-canary")).toBe("a".repeat(64));
+  });
+
+  it("skips lines that don't match the expected format", () => {
+    const manifest = `invalid line\n${"a".repeat(64)}  stellar-canary\nnot a checksum\n`;
+    const result = parseChecksumManifest(manifest);
+
+    expect(result.get("stellar-canary")).toBe("a".repeat(64));
+    expect(result.size).toBe(1);
+  });
+
+  it("returns empty map for empty input", () => {
+    const result = parseChecksumManifest("");
+    expect(result.size).toBe(0);
+  });
+
+  it("returns empty map for input with only whitespace", () => {
+    const result = parseChecksumManifest("   \n\n  \n");
+    expect(result.size).toBe(0);
+  });
+
+  it("handles multiple entries with same filename (last wins)", () => {
+    const manifest = `${"a".repeat(64)}  stellar-canary\n${"b".repeat(64)}  stellar-canary\n`;
+    const result = parseChecksumManifest(manifest);
+
+    expect(result.get("stellar-canary")).toBe("b".repeat(64));
+  });
+
+  it("extracts just the basename from a path", () => {
+    const manifest = `${"a".repeat(64)}  path/to/stellar-canary\n`;
+    const result = parseChecksumManifest(manifest);
+
+    expect(result.get("stellar-canary")).toBe("a".repeat(64));
   });
 });
 

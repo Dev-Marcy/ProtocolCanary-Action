@@ -89,7 +89,7 @@ function httpsGetText(url: string, token: string | undefined): Promise<string> {
 /** Parses a `sha256sum`-style manifest (`<hex digest>  <filename>` lines,
  * with `*` binary-mode markers and `#` comments tolerated) into a map of
  * file base name to lower-case hex digest. */
-function parseChecksumManifest(text: string): Map<string, string> {
+export function parseChecksumManifest(text: string): Map<string, string> {
   const entries = new Map<string, string>();
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -113,7 +113,7 @@ function parseChecksumManifest(text: string): Map<string, string> {
  * no checksum asset, or no parseable manifest is available, so callers can
  * fall back to commit/tag pinning exactly as before.
  */
-async function lookupPublishedChecksums(version: string): Promise<Map<string, string> | undefined> {
+export async function lookupPublishedChecksums(version: string): Promise<Map<string, string> | undefined> {
   const token = (process.env.GITHUB_TOKEN ?? "").trim() === "" ? undefined : process.env.GITHUB_TOKEN?.trim();
   try {
     const releaseBody = await httpsGetText(`${CANARY_API_REPO_URL}/releases/tags/v${version}`, token);
