@@ -442,10 +442,31 @@ describe("ensureCanaryInstalled", () => {
     }
   });
 
-  it("rejects when `cargo install` exits non-zero", async () => {
+  it("maps a non-zero `cargo install` exit to InstallationFailedError with the repository URL", async () => {
     spawnMock.mockImplementation(() => new ImmediateChild(7) as unknown as ChildProcess);
 
-    await expect(ensureCanaryInstalled(RESOLVED)).rejects.toThrow(InstallationFailedError);
+    const error = await ensureCanaryInstalled(RESOLVED).then(
+      () => {
+        throw new Error("expected ensureCanaryInstalled to reject");
+      },
+      (rejection: unknown) => rejection,
+    );
+
+    expect(error).toBeInstanceOf(InstallationFailedError);
+    expect((error as InstallationFailedError).message).toContain("exited with code 7");
+    expect((error as InstallationFailedError).message).toContain(CANARY_REPO_URL);
+  });
+
+  it("warns but succeeds when saving an installed binary to cache fails", async () => {
+    cacheMocks.isFeatureAvailableMock.mockReturnValue(true);
+    cacheMocks.saveCacheMock.mockRejectedValue(new Error("cache quota exceeded"));
+
+    const installed = await ensureCanaryInstalled(RESOLVED);
+
+    expect(installed).toEqual({ binaryPath: binaryPath(), version: RESOLVED.version });
+    expect(cacheMocks.saveCacheMock).toHaveBeenCalledOnce();
+    expect(coreMocks.warningMock).toHaveBeenCalledWith("Cache save failed, ignoring: Error: cache quota exceeded");
+    expect(spawnMock).toHaveBeenCalled();
   });
 
   it("rejects with CanaryNotFoundError when no working binary appears after install", async () => {
@@ -743,6 +764,7 @@ describe("ensureCanaryInstalled install timeout (issue #65)", () => {
     await pending.catch((error: InstallationFailedError) => {
       expect(error.message).toContain("timed out");
       expect(error.message).toContain("cargo install");
+      expect(error.message).toContain(CANARY_REPO_URL);
     });
     expect(hung.signals).toEqual(["SIGTERM"]);
   });
