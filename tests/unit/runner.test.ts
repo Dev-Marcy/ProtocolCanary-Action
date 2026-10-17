@@ -56,6 +56,8 @@ const BASE_INPUTS: ActionInputs = {
   annotations: true,
   timeoutMinutes: 15,
   allowEmpty: false,
+  fixturesPackVersion: undefined,
+  fixturesPackProtocol: undefined,
 };
 
 describe("buildCheckArgs", () => {

@@ -101,6 +101,8 @@ const INPUTS: ActionInputs = {
   annotations: true,
   timeoutMinutes: 1,
   allowEmpty: false,
+  fixturesPackVersion: undefined,
+  fixturesPackProtocol: undefined,
 };
 
 const PASS_REPORT = report({

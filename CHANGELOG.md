@@ -6,6 +6,16 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `fixtures-pack-version` and `fixtures-pack-protocol` inputs, validated when
+  set: the version must be a published pack release tag (`v1.2.0` or
+  `1.2.0`, with an unpinned value such as `latest`/`main` rejected) and the
+  protocol a positive integer, so `0` — which the `protocol` input accepts —
+  is refused here. Both are currently **not forwarded** to Canary: its
+  fixture-loading contract accepts a local path via `--fixtures-dir` and
+  defines no other loading mechanism, with remote bundles fetched by version
+  explicitly out of scope upstream for now. The Action logs a note naming the
+  fixtures directory it actually used, so a set-but-unused input cannot be
+  mistaken for a pinned pack ([#337]).
 - `allow-empty` input (default `false`). It forwards `--allow-empty` to Protocol-Canary
   `0.2.0` and newer, which fail a run that executes no checks. With an older `version`
   the flag is not forwarded, because those versions already pass an empty run and would
