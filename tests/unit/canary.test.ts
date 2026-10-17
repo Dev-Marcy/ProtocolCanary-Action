@@ -209,6 +209,12 @@ function respond(statusCode: number, body: string): any {
   };
 }
 
+function simulateRequestTimeout(): FakeRequest {
+  const request = new FakeRequest();
+  queueMicrotask(() => request.emit("timeout"));
+  return request;
+}
+
 /** Serves a release whose assets include a checksum manifest, then the
  * manifest itself, for the next two GitHub requests. */
 function mockPublishedChecksums(manifest: string): void {
@@ -488,6 +494,66 @@ describe("ensureCanaryInstalled", () => {
     const installed = await ensureCanaryInstalled(RESOLVED);
 
     expect(installed.binaryPath).toBe(binaryPath());
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(httpsGetMock).toHaveBeenCalledOnce();
+    expect(coreMocks.debugMock).toHaveBeenCalledWith(expect.stringContaining("status 404"));
+  });
+
+  it("handles a redirected release lookup without an unhandled rejection", async () => {
+    fs.writeFileSync(binaryPath(), "binary");
+    httpsGetMock.mockImplementationOnce(respond(302, ""));
+
+    const installed = await ensureCanaryInstalled(RESOLVED);
+
+    expect(installed.binaryPath).toBe(binaryPath());
+    expect(httpsGetMock).toHaveBeenCalledOnce();
+    expect(coreMocks.debugMock).toHaveBeenCalledWith(expect.stringContaining("status 302"));
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("handles checksum lookup request timeouts and logs the target URL", async () => {
+    fs.writeFileSync(binaryPath(), "binary");
+    httpsGetMock.mockImplementationOnce((() => simulateRequestTimeout()) as never);
+
+    const installed = await ensureCanaryInstalled(RESOLVED);
+
+    expect(installed.binaryPath).toBe(binaryPath());
+    expect(httpsGetMock).toHaveBeenCalledOnce();
+    expect(coreMocks.debugMock).toHaveBeenCalledWith(
+      expect.stringContaining("timed out fetching https://api.github.com/repos/StellarCanary/Protocol-Canary/releases/tags/v0.1.0"),
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back when the release response is malformed JSON", async () => {
+    fs.writeFileSync(binaryPath(), "binary");
+    httpsGetMock.mockImplementationOnce(respond(200, "{not valid JSON"));
+
+    const installed = await ensureCanaryInstalled(RESOLVED);
+
+    expect(installed.binaryPath).toBe(binaryPath());
+    expect(coreMocks.debugMock).toHaveBeenCalledWith(expect.stringContaining("Could not look up a published checksum"));
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores malformed checksum manifest entries", async () => {
+    fs.writeFileSync(binaryPath(), "binary");
+    httpsGetMock
+      .mockImplementationOnce(
+        respond(
+          200,
+          JSON.stringify({
+            assets: [{ name: "SHA256SUMS", browser_download_url: "https://example.test/SHA256SUMS" }],
+          }),
+        ),
+      )
+      .mockImplementationOnce(respond(200, `not-a-digest  ${platformBinaryName()}\n${"a".repeat(63)}  other-binary\n`));
+
+    const installed = await ensureCanaryInstalled(RESOLVED);
+
+    expect(installed.binaryPath).toBe(binaryPath());
+    expect(httpsGetMock).toHaveBeenCalledTimes(2);
+    expect(coreMocks.debugMock).toHaveBeenCalledWith(expect.stringContaining("No published checksum manifest"));
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
