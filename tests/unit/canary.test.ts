@@ -400,6 +400,18 @@ describe("ensureCanaryInstalled", () => {
     );
   });
 
+  it("warns but succeeds when saving an installed binary to cache fails", async () => {
+    cacheMocks.isFeatureAvailableMock.mockReturnValue(true);
+    cacheMocks.saveCacheMock.mockRejectedValue(new Error("cache quota exceeded"));
+
+    const installed = await ensureCanaryInstalled(RESOLVED);
+
+    expect(installed).toEqual({ binaryPath: binaryPath(), version: RESOLVED.version });
+    expect(cacheMocks.saveCacheMock).toHaveBeenCalledOnce();
+    expect(coreMocks.warningMock).toHaveBeenCalledWith("Cache save failed, ignoring: Error: cache quota exceeded");
+    expect(spawnMock).toHaveBeenCalled();
+  });
+
   // #228: cacheKeyFor is private and zero-argument; its only real branch is
   // the `commitSha ?? tag` precedence. Pinned through the cache key it hands
   // to restore/save — the observable surface it drives — so a regression
@@ -482,6 +494,7 @@ describe("ensureCanaryInstalled", () => {
 
     expect(caughtError).toBeInstanceOf(InstallationFailedError);
     expect(caughtError?.message).toContain("`cargo install` exited with code 101");
+    expect(caughtError?.message).toContain(CANARY_REPO_URL);
     // Bounded to last 40 lines
     expect(caughtError?.message).toContain("cargo error line 50");
     expect(caughtError?.message).toContain("cargo error line 11");
@@ -1086,6 +1099,7 @@ describe("ensureCanaryInstalled install timeout (issue #65)", () => {
     await pending.catch((error: InstallationFailedError) => {
       expect(error.message).toContain("timed out");
       expect(error.message).toContain("cargo install");
+      expect(error.message).toContain(CANARY_REPO_URL);
     });
     expect(hung.signals).toEqual(["SIGTERM"]);
   });

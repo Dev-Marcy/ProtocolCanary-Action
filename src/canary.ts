@@ -322,10 +322,10 @@ async function restoreFromCache(resolved: ResolvedVersion): Promise<InstalledCan
  *
  * The cache key comes from {@link cacheKeyFor}, which embeds the platform,
  * architecture and immutable pin. This is strictly a performance
- * optimization and is deliberately silent about failure: every error —
- * including `@actions/cache` throwing when a save conflicts with an existing
- * entry — is swallowed after a `core.debug` log, so a cache outage never
- * turns a successful install into a failed run. Restored binaries are still
+ * optimization: every error — including `@actions/cache` throwing when a
+ * save conflicts with an existing entry — is swallowed after a `core.warning`
+ * log, so a cache outage never turns a successful install into a failed run.
+ * Restored binaries are still
  * re-verified by {@link verifyInstalledBinary} in
  * {@link restoreFromCache}'s caller, so a bad cache entry cannot be trusted.
  *
@@ -346,7 +346,7 @@ async function saveToCache(resolved: ResolvedVersion, binaryPath: string): Promi
     await cache.saveCache([binaryPath], cacheKeyFor(resolved));
   } catch (error) {
     // Caching is a pure optimization; correctness never depends on it.
-    core.debug(`Cache save failed, ignoring: ${String(error)}`);
+    core.warning(`Cache save failed, ignoring: ${String(error)}`);
   }
 }
 
@@ -397,7 +397,7 @@ function describeInstallFailure(error: unknown, timeoutMs: number, resolved: Res
     }
     const diagnosticTail = formatSafeDiagnosticTail(error.stderr, 40, 8 * 1024);
     const baseMessage =
-      `\`cargo install\` for Protocol-Canary ${resolved.version} timed out after ` +
+      `\`cargo install\` for Protocol-Canary ${resolved.version} from ${CANARY_REPO_URL} timed out after ` +
       `${String(Math.round(timeoutMs / 1000))}s and was terminated. ` +
       "This is usually a stalled network connection or an extremely slow build on the runner. " +
       "Re-run the job, or raise the Action's `timeout-minutes` input if a build of this size " +
@@ -459,7 +459,7 @@ async function cargoInstall(resolved: ResolvedVersion, timeoutMs: number): Promi
     const diagnosticTail = formatSafeDiagnosticTail(execution.stderr, 40, 8 * 1024);
     const baseMessage =
       `\`cargo install\` exited with code ${String(execution.exitCode)} while installing ` +
-      `Protocol-Canary ${resolved.version}.`;
+      `Protocol-Canary ${resolved.version} from ${CANARY_REPO_URL}.`;
     const message = diagnosticTail !== "" ? `${baseMessage}\n\n${diagnosticTail}` : baseMessage;
     throw new InstallationFailedError(message, diagnosticTail !== "" ? diagnosticTail : undefined);
   }
