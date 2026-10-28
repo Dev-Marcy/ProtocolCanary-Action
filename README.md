@@ -512,6 +512,7 @@ Interfaces shared with the other two repositories (report, lockfile,
 comparison, fixture releases, project roots) are specified in
 [`docs/contracts.md`](docs/contracts.md).
 
+
 Repositories that want a single-declaration compatibility check can call the
 maintained reusable workflow; its inputs, outputs, and matrix, monorepo, and
 PR-gating examples are documented in
